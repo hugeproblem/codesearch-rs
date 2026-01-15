@@ -38,6 +38,10 @@ struct Args {
 
     /// The pattern to search for
     pattern: Option<String>,
+
+    /// Filter by current working directory
+    #[arg(long)]
+    pwd: bool,
 }
 
 fn main() -> Result<()> {
@@ -81,6 +85,7 @@ fn main() -> Result<()> {
     };
     
     let index = Index::open(&index_path).context(format!("failed to open index {}", index_path))?;
+    let index_dir = Path::new(&index_path).parent().unwrap_or(Path::new("."));
     
     let pattern = if args.ignore_case {
         // Check if pattern already has (?i) to avoid double prefix if user provided it?
@@ -113,6 +118,13 @@ fn main() -> Result<()> {
         }
     }
     
+    let cwd_canonical = if args.pwd {
+        Some(std::env::current_dir().context("failed to get current directory")?
+             .canonicalize().context("failed to canonicalize current directory")?)
+    } else {
+        None
+    };
+    
     let re = RegexBuilder::new(&pattern)
         .case_insensitive(args.ignore_case)
         .build()
@@ -127,7 +139,27 @@ fn main() -> Result<()> {
             continue;
         }
         
-        let path = Path::new(&name);
+        let raw_path = Path::new(&name);
+        let resolved_path = if raw_path.is_relative() {
+            let p = index_dir.join(raw_path);
+            p.components()
+                .filter(|c| !matches!(c, std::path::Component::CurDir))
+                .collect::<std::path::PathBuf>()
+        } else {
+            raw_path.to_path_buf()
+        };
+        
+        if let Some(ref cwd) = cwd_canonical {
+             let abs_path = match resolved_path.canonicalize() {
+                 Ok(p) => p,
+                 Err(_) => continue, // Skip if file doesn't exist or can't be canonicalized
+             };
+             if !abs_path.starts_with(cwd) {
+                 continue;
+             }
+        }
+        
+        let path = resolved_path.as_path();
         
         if let Some(ref matcher) = types_matcher {
              if !matches!(matcher.matched(path, false), Match::Whitelist(_)) {
@@ -139,7 +171,7 @@ fn main() -> Result<()> {
             Ok(f) => f,
             Err(e) => {
                 if args.verbose {
-                    eprintln!("Warning: failed to open {}: {}", name, e);
+                    eprintln!("Warning: failed to open {}: {}", path.display(), e);
                 }
                 continue;
             }
@@ -158,15 +190,15 @@ fn main() -> Result<()> {
                         // Remove trailing \r if present
                         let line = line.trim_end_matches('\r');
                         if args.line_number {
-                            println!("{}:{}:{}", name, line_num, line);
+                            println!("{}:{}:{}", path.display(), line_num, line);
                         } else {
-                            println!("{}:{}", name, line);
+                            println!("{}:{}", path.display(), line);
                         }
                     }
                 }
                 Err(e) => {
                     if args.verbose {
-                        eprintln!("Warning: error reading line {} from {}: {}", line_num, name, e);
+                        eprintln!("Warning: error reading line {} from {}: {}", line_num, path.display(), e);
                     }
                     break;
                 }
