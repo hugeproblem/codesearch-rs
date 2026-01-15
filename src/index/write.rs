@@ -6,6 +6,7 @@ use byteorder::{BigEndian, WriteBytesExt};
 use memmap2::Mmap;
 use crate::sparse_set::Set as SparseSet;
 
+const NAME_GROUP_SIZE: usize = 16;
 const MAX_FILE_LEN: u64 = 1 << 30;
 const MAX_LINE_LEN: usize = 2000;
 const MAX_TEXT_TRIGRAMS: usize = 20000;
@@ -290,11 +291,12 @@ pub struct PathWriterState {
     last: String,
     n: usize,
     group: usize,
+    start: Option<u64>,  // Track the starting offset
 }
 
 impl PathWriterState {
     pub fn new(group: usize) -> Self {
-        PathWriterState { last: String::new(), n: 0, group }
+        PathWriterState { last: String::new(), n: 0, group, start: None }
     }
 }
 
@@ -307,7 +309,11 @@ pub struct PathWriter<'a> {
 
 impl<'a> PathWriter<'a> {
     pub fn new(data: &'a mut IndexBuffer, index: Option<&'a mut IndexBuffer>, state: &'a mut PathWriterState) -> Self {
-        let start = data.offset();
+        // Only set start on first call
+        if state.start.is_none() {
+            state.start = Some(data.offset());
+        }
+        let start = state.start.unwrap();
         PathWriter {
             data,
             index,
@@ -321,7 +327,9 @@ impl<'a> PathWriter<'a> {
         
         if write_index {
              if let Some(ref mut idx) = self.index {
-                 idx.write_uvarint(self.data.offset() - self.start)?;
+                 // Write 8-byte offset for compatibility with reader
+                 let off = self.data.offset() - self.start;
+                 idx.write_uint64(off)?;
              }
         }
         
@@ -600,7 +608,7 @@ impl IndexWriter {
             post_ends: Vec::new(),
             verbose: false,
             log_skip: false,
-            name_writer_state: PathWriterState::new(0),
+            name_writer_state: PathWriterState::new(NAME_GROUP_SIZE),
         })
     }
     
@@ -636,10 +644,8 @@ impl IndexWriter {
                 if self.log_skip { eprintln!("{}: contains NUL, ignoring", name); }
                 return Ok(());
             }
-            if !valid_utf8((tv >> 8) & 0xFF, c as u32) {
-                 if self.log_skip { eprintln!("{}: invalid UTF-8, ignoring", name); }
-                 return Ok(());
-            }
+            // Note: We don't validate UTF-8 here as many source files use Latin-1 or other encodings.
+            // The NUL check above is sufficient to skip binary files.
             if linelen > MAX_LINE_LEN {
                  if self.log_skip { eprintln!("{}: very long lines, ignoring", name); }
                  return Ok(());
@@ -851,14 +857,4 @@ impl IndexWriter {
 }
 
 
-fn valid_utf8(c1: u32, c2: u32) -> bool {
-    if c1 < 0x80 {
-        c2 < 0x80 || (0xc0 <= c2 && c2 < 0xf8)
-    } else if c1 < 0xc0 {
-        c2 < 0xf8
-    } else if c1 < 0xf8 {
-        (0x80 <= c2) && (c2 < 0xc0)
-    } else {
-        false
-    }
-}
+

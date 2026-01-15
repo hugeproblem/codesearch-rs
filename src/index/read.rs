@@ -6,6 +6,14 @@ use std::str;
 use crate::index::regexp::{Query, QueryOp};
 use byteorder::{BigEndian, ByteOrder};
 
+// Helper function to read 24-bit big-endian integer
+fn read_u24_be(buf: &[u8]) -> u32 {
+    if buf.len() < 3 {
+        return 0;
+    }
+    ((buf[0] as u32) << 16) | ((buf[1] as u32) << 8) | (buf[2] as u32)
+}
+
 // Constants
 const TRAILER_MAGIC_V2: &str = "\ncsearch trlr 2\n";
 const POST_BLOCK_SIZE: usize = 256;
@@ -48,6 +56,11 @@ impl Index {
         }
         let n = n as usize;
         
+        // Ensure we have enough data to read all the trailer fields
+        if n + 64 > mmap.len() {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid trailer size"));
+        }
+        
         let path_data = BigEndian::read_u64(&mmap[n..n+8]) as usize;
         let num_path = BigEndian::read_u64(&mmap[n+8..n+16]) as usize;
         let name_data = BigEndian::read_u64(&mmap[n+16..n+24]) as usize;
@@ -57,7 +70,24 @@ impl Index {
         let name_index = BigEndian::read_u64(&mmap[n+48..n+56]) as usize;
         let post_index = BigEndian::read_u64(&mmap[n+56..n+64]) as usize;
         
-        let num_post_block = (n - post_index) / POST_BLOCK_SIZE;
+        // Validate offsets are within file bounds
+        if path_data >= mmap.len() || name_data >= mmap.len() || 
+           post_data >= mmap.len() || name_index >= mmap.len() || 
+           post_index >= mmap.len() {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid section offsets"));
+        }
+        
+        // Validate ordering: path_data <= name_data <= post_data <= name_index <= post_index
+        if path_data > name_data || name_data > post_data || 
+           post_data > name_index || name_index > post_index {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid section ordering"));
+        }
+        
+        let num_post_block = if post_index <= n {
+            (n - post_index) / POST_BLOCK_SIZE
+        } else {
+            0
+        };
 
         Ok(Index {
             mmap,
@@ -78,6 +108,9 @@ impl Index {
     }
     
     fn uint64(&self, off: usize) -> u64 {
+        if off + 8 > self.mmap.len() {
+            return 0;
+        }
         BigEndian::read_u64(&self.mmap[off..off+8])
     }
     
@@ -87,29 +120,37 @@ impl Index {
     }
     
     pub fn names_at(&self, min: usize, max: usize) -> PathReader<'_> {
-        if min >= self.num_name {
+        if min >= self.num_name || max <= min {
             return PathReader::new(&[], 0);
         }
         let mut limit = max - min;
         let off_idx = self.name_index + (min / NAME_GROUP_SIZE) * 8;
-        let off = self.uint64(off_idx) as usize;
         
-        // limit += min % NAME_GROUP_SIZE; // Go code does this, why?
-        // Ah, because we start reading from the beginning of the group (min/16 * 16)
-        // so we need to read more items to reach 'max'.
-        // Actually the reader just reads 'limit' items.
-        // If we skip 'min % 16' items, we consume them from the reader.
-        // So we need to initialize the reader with enough limit to cover the skip + actual items.
+        // Check bounds for name_index access
+        if off_idx + 8 > self.mmap.len() {
+            return PathReader::new(&[], 0);
+        }
+        
+        let off = self.uint64(off_idx) as usize;
         
         let skip = min % NAME_GROUP_SIZE;
         limit += skip;
         
-        let end = self.post_data; 
-        let data = &self.mmap[self.name_data + off .. end];
+        let data_start = self.name_data + off;
+        let end = self.post_data;
+        
+        // Check bounds
+        if data_start >= end || data_start >= self.mmap.len() || end > self.mmap.len() {
+            return PathReader::new(&[], 0);
+        }
+        
+        let data = &self.mmap[data_start .. end];
         
         let mut r = PathReader::new(data, limit);
         for _ in 0..skip {
-            r.next();
+            if r.next().is_none() {
+                break;
+            }
         }
         r
     }
@@ -225,14 +266,26 @@ impl Index {
     }
     
     fn find_list_v2(&self, trigram: u32) -> (usize, usize) {
-        let b = &self.mmap[self.post_index .. self.post_index + self.num_post_block * POST_BLOCK_SIZE];
+        if self.num_post_block == 0 {
+            return (0, 0);
+        }
+        
+        let post_index_end = self.post_index + self.num_post_block * POST_BLOCK_SIZE;
+        if post_index_end > self.mmap.len() {
+            return (0, 0);
+        }
+        
+        let b = &self.mmap[self.post_index .. post_index_end];
         
         let mut i = 0; 
         let mut j = self.num_post_block;
         while i < j {
              let h = i + (j - i) / 2;
              let off = h * POST_BLOCK_SIZE;
-             let t = BigEndian::read_u24(&b[off..off+3]);
+             if off + 3 > b.len() {
+                 break;
+             }
+             let t = read_u24_be(&b[off..off+3]);
              if t > trigram {
                  j = h;
              } else {
@@ -245,17 +298,30 @@ impl Index {
         }
         
         let block_start = (i - 1) * POST_BLOCK_SIZE;
-        let mut block = &b[block_start .. i * POST_BLOCK_SIZE];
+        let block_end = i * POST_BLOCK_SIZE;
+        if block_end > b.len() {
+            return (0, 0);
+        }
+        let mut block = &b[block_start .. block_end];
         
         let mut offset = 0;
         
         while block.len() >= 3 {
-             let t = BigEndian::read_u24(&block[0..3]);
+             let t = read_u24_be(&block[0..3]);
              if t == 0 {
                  break;
              }
+             if block.len() < 3 {
+                 break;
+             }
              let (count, n1) = read_uvarint(&block[3..]);
+             if n1 == 0 || 3 + n1 > block.len() {
+                 break;
+             }
              let (off, n2) = read_uvarint(&block[3+n1..]);
+             if n2 == 0 || 3 + n1 + n2 > block.len() {
+                 break;
+             }
              offset += off as usize;
              
              if t == trigram {
@@ -384,7 +450,17 @@ impl<'a> PostReader<'a> {
              };
         }
         
-        let data = ix.slice_from(ix.post_data + offset + 3);
+        let data_start = ix.post_data + offset + 3;
+        if data_start >= ix.mmap.len() {
+            return PostReader {
+                count: 0,
+                fileid: -1,
+                restrict: None,
+                delta: DeltaReader::new(&[]),
+            };
+        }
+        
+        let data = ix.slice_from(data_start);
         
         PostReader {
             count,

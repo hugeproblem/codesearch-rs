@@ -146,15 +146,20 @@ impl Query {
     }
 
     pub fn and_trigrams(self, t: Vec<String>) -> Query {
-         if min_len(&t) < 3 {
+         // Trigrams are byte-based (3 consecutive bytes), matching the index
+         if t.iter().any(|s| s.len() < 3) {
              return self;
          }
          let mut or_q = Query::none();
          for tt in t {
              let mut trig = Vec::new();
-             for i in 0..=tt.len().saturating_sub(3) {
-                 if i + 3 <= tt.len() {
-                    trig.push(tt[i..i+3].to_string());
+             let bytes = tt.as_bytes();
+             for i in 0..=bytes.len().saturating_sub(3) {
+                 if i + 3 <= bytes.len() {
+                    // Only include valid UTF-8 trigrams
+                    if let Ok(s) = std::str::from_utf8(&bytes[i..i+3]) {
+                        trig.push(s.to_string());
+                    }
                  }
              }
              clean_set(&mut trig);
@@ -271,6 +276,32 @@ fn min_len(s: &[String]) -> usize {
     s.iter().map(|x| x.len()).min().unwrap_or(0)
 }
 
+// Get prefix of up to n bytes, respecting UTF-8 boundaries
+fn safe_prefix(s: &str, n: usize) -> String {
+    if n >= s.len() {
+        return s.to_string();
+    }
+    // Find the largest valid UTF-8 boundary <= n
+    let mut end = n;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
+}
+
+// Get suffix of up to n bytes, respecting UTF-8 boundaries
+fn safe_suffix(s: &str, n: usize) -> String {
+    if n >= s.len() {
+        return s.to_string();
+    }
+    // Find the smallest valid UTF-8 boundary >= len - n
+    let mut start = s.len().saturating_sub(n);
+    while start < s.len() && !s.is_char_boundary(start) {
+        start += 1;
+    }
+    s[start..].to_string()
+}
+
 // Regex Analysis
 
 const MAX_EXACT: usize = 7;
@@ -345,7 +376,7 @@ impl RegexpInfo {
     fn simplify(&mut self, force: bool) {
         if let Some(mut exact) = self.exact.take() {
              clean_set(&mut exact);
-             let min_l = min_len(&exact);
+             let min_l = min_len(&exact);  // Use byte length for consistency with index
              if exact.len() > MAX_EXACT || (min_l >= 3 && force) || min_l >= 4 {
                  self.match_q = self.match_q.clone().and_trigrams(exact.clone());
                  for s in exact.iter() {
@@ -354,8 +385,11 @@ impl RegexpInfo {
                          self.prefix.push(s.clone());
                          self.suffix.push(s.clone());
                      } else {
-                         self.prefix.push(s[..2].to_string());
-                         self.suffix.push(s[n-2..].to_string());
+                         // Find safe UTF-8 boundaries for prefix (first 2 bytes if valid)
+                         let prefix = safe_prefix(s, 2);
+                         let suffix = safe_suffix(s, 2);
+                         self.prefix.push(prefix);
+                         self.suffix.push(suffix);
                      }
                  }
                  self.exact = None;
@@ -382,14 +416,15 @@ fn simplify_set(s: &mut Vec<String>, is_suffix: bool) {
         
         let mut new_s = Vec::new();
         for str in s.iter() {
-            let mut val = str.clone();
-            if val.len() >= n {
+            let val = if str.len() >= n {
                 if !is_suffix {
-                    val = val[..n-1].to_string();
+                    safe_prefix(str, n - 1)
                 } else {
-                    val = val[val.len()-n+1..].to_string();
+                    safe_suffix(str, n - 1)
                 }
-            }
+            } else {
+                str.clone()
+            };
             new_s.push(val);
         }
         *s = new_s;
