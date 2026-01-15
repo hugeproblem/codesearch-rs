@@ -63,6 +63,8 @@ csearch [OPTIONS] <PATTERN>
 - `-v, --verbose`: Enable verbose output
 - `-i, --ignore-case`: Case-insensitive search
 - `-n, --line-number`: Print line numbers
+- `-f, --file-type <FILE_TYPE>`: Filter by file type (e.g. "rust", "cpp", "go")
+- `--list-file-types`: List supported file types
 - `-h, --help`: Print help
 - `-V, --version`: Print version
 
@@ -79,6 +81,12 @@ csearch "class\s+\w+"
 
 # Use specific index file
 csearch -x /path/to/index "pattern"
+
+# Filter by file type
+csearch -f rust "struct"
+
+# List supported file types
+csearch --list-file-types
 ```
 
 ## Index File Discovery

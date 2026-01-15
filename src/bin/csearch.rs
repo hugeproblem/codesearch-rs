@@ -6,6 +6,8 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use regex::bytes::RegexBuilder;
 use std::path::Path;
+use ignore::types::TypesBuilder;
+use ignore::Match;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -26,12 +28,50 @@ struct Args {
     #[arg(short = 'n', long)]
     line_number: bool,
 
+    /// Filter by file type (e.g. "rust", "cpp", "go")
+    #[arg(short = 'f', long = "file-type")]
+    file_type: Option<String>,
+
+    /// List supported file types
+    #[arg(long)]
+    list_file_types: bool,
+
     /// The pattern to search for
-    pattern: String,
+    pattern: Option<String>,
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    
+    if args.list_file_types {
+        let mut builder = TypesBuilder::new();
+        builder.add_defaults();
+        let types = builder.build().context("failed to build type list")?;
+        
+        for def in types.definitions() {
+            println!("{}: {:?}", def.name(), def.globs());
+        }
+        return Ok(());
+    }
+
+    let pattern_str = match args.pattern {
+        Some(p) => p,
+        None => {
+            use clap::CommandFactory;
+            let mut cmd = Args::command();
+            cmd.print_help()?;
+            return Ok(());
+        }
+    };
+    
+    let types_matcher = if let Some(ref ftype) = args.file_type {
+        let mut builder = TypesBuilder::new();
+        builder.add_defaults();
+        builder.select(ftype);
+        Some(builder.build().context("failed to build type matcher")?)
+    } else {
+        None
+    };
     
     // Open index
     let index_path = if let Some(p) = args.index {
@@ -45,9 +85,9 @@ fn main() -> Result<()> {
     let pattern = if args.ignore_case {
         // Check if pattern already has (?i) to avoid double prefix if user provided it?
         // But prepending is safe usually.
-        format!("(?i){}", args.pattern)
+        format!("(?i){}", pattern_str)
     } else {
-        args.pattern.clone()
+        pattern_str.clone()
     };
     
     if args.verbose {
@@ -88,6 +128,12 @@ fn main() -> Result<()> {
         }
         
         let path = Path::new(&name);
+        
+        if let Some(ref matcher) = types_matcher {
+             if !matches!(matcher.matched(path, false), Match::Whitelist(_)) {
+                 continue;
+             }
+        }
         
         let file = match File::open(path) {
             Ok(f) => f,
