@@ -65,6 +65,7 @@ csearch [OPTIONS] <PATTERN>
 - `-n, --line-number`: Print line numbers
 - `-f, --file-type <FILE_TYPE>`: Filter by file type (e.g. "rust", "cpp", "go")
 - `--list-file-types`: List supported file types
+- `--pwd`: Filter results to current working directory only
 - `-h, --help`: Print help
 - `-V, --version`: Print version
 
@@ -85,9 +86,23 @@ csearch -x /path/to/index "pattern"
 # Filter by file type
 csearch -f rust "struct"
 
+# Search only in current directory
+csearch --pwd "pattern"
+
 # List supported file types
 csearch --list-file-types
 ```
+
+## Encoding Support
+
+Both `cindex` and `csearch` support files with various text encodings:
+
+- **UTF-8**: Fully supported (default)
+- **Latin-1/ISO-8859-1**: Supported (common in older codebases)
+- **Other 8-bit encodings**: Supported for indexing and searching
+- **Binary files**: Automatically skipped (detected by NUL bytes)
+
+This means you can search through codebases that contain files with mixed encodings without issues.
 
 ## Index File Discovery
 
