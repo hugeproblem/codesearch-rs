@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use rust_codesearch::index::{Index, regexp};
 use rust_codesearch::find_index_file;
 use std::fs::File;
@@ -8,6 +8,16 @@ use regex::bytes::RegexBuilder;
 use std::path::Path;
 use ignore::types::TypesBuilder;
 use ignore::Match;
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug, ValueEnum)]
+enum PathFormat {
+    /// Relative path from current directory
+    Relative,
+    /// Full absolute path
+    Full,
+    /// UNC path (Windows extended path format)
+    Unc,
+}
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -42,6 +52,57 @@ struct Args {
     /// Filter by current working directory
     #[arg(long)]
     pwd: bool,
+
+    /// Path display format (relative, full, unc)
+    #[arg(short = 'p', long, value_enum, default_value = "relative")]
+    path_format: PathFormat,
+}
+
+/// Format path according to the specified format
+fn format_path(path: &Path, format: PathFormat, cwd: &Path) -> String {
+    match format {
+        PathFormat::Relative => {
+            // Try to make path relative to current directory
+            if let Ok(rel) = path.strip_prefix(cwd) {
+                rel.display().to_string()
+            } else if let Ok(canonical) = path.canonicalize() {
+                // Try with canonical path
+                if let Ok(rel) = canonical.strip_prefix(cwd) {
+                    rel.display().to_string()
+                } else {
+                    // Fall back to full path if can't make relative
+                    strip_unc_prefix(&canonical.display().to_string())
+                }
+            } else {
+                path.display().to_string()
+            }
+        }
+        PathFormat::Full => {
+            // Full absolute path without UNC prefix
+            if let Ok(canonical) = path.canonicalize() {
+                strip_unc_prefix(&canonical.display().to_string())
+            } else {
+                strip_unc_prefix(&path.display().to_string())
+            }
+        }
+        PathFormat::Unc => {
+            // Full path with UNC prefix (Windows extended path)
+            if let Ok(canonical) = path.canonicalize() {
+                canonical.display().to_string()
+            } else {
+                path.display().to_string()
+            }
+        }
+    }
+}
+
+/// Strip Windows UNC prefix (\\?\) from path
+fn strip_unc_prefix(path: &str) -> String {
+    if path.starts_with(r"\\?\") {
+        path[4..].to_string()
+    } else {
+        path.to_string()
+    }
 }
 
 fn main() -> Result<()> {
@@ -125,6 +186,10 @@ fn main() -> Result<()> {
         None
     };
     
+    // Get cwd for path formatting
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let cwd_for_format = cwd.canonicalize().unwrap_or(cwd);
+    
     let re = RegexBuilder::new(&pattern)
         .case_insensitive(args.ignore_case)
         .build()
@@ -179,6 +244,9 @@ fn main() -> Result<()> {
         
         let reader = BufReader::new(file);
         
+        // Format path according to user preference
+        let display_path = format_path(path, args.path_format, &cwd_for_format);
+        
         let mut line_num = 0;
         for line_res in reader.split(b'\n') {
             line_num += 1;
@@ -190,15 +258,15 @@ fn main() -> Result<()> {
                         // Remove trailing \r if present
                         let line = line.trim_end_matches('\r');
                         if args.line_number {
-                            println!("{}:{}:{}", path.display(), line_num, line);
+                            println!("{}:{}:{}", display_path, line_num, line);
                         } else {
-                            println!("{}:{}", path.display(), line);
+                            println!("{}:{}", display_path, line);
                         }
                     }
                 }
                 Err(e) => {
                     if args.verbose {
-                        eprintln!("Warning: error reading line {} from {}: {}", line_num, path.display(), e);
+                        eprintln!("Warning: error reading line {} from {}: {}", line_num, display_path, e);
                     }
                     break;
                 }
