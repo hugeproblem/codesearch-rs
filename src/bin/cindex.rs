@@ -1,6 +1,7 @@
 use clap::Parser;
 use rust_codesearch::index::IndexWriter;
 use rust_codesearch::index::merge::merge;
+use rust_codesearch::index::read::Index;
 use rust_codesearch::find_index_file;
 use ignore::WalkBuilder;
 use std::collections::HashSet;
@@ -204,10 +205,24 @@ fn main() -> anyhow::Result<()> {
     
     let path_exists = Path::new(&index_file).exists();
     
-    if args.reset || !path_exists {
+    // Check if existing index is valid
+    let index_valid = if path_exists {
+        Index::open(&index_file).is_ok()
+    } else {
+        false
+    };
+    
+    if args.reset || !path_exists || !index_valid {
+        if args.verbose {
+            if !index_valid && path_exists {
+                println!("Existing index is invalid, overwriting: {}", index_file);
+            } else {
+                println!("Creating index at: {}", index_file);
+            }
+        }
         let mut ix = IndexWriter::create(&index_file)?;
-        if args.verbose { println!("Creating index at: {}", index_file); }
         ix.verbose = args.verbose;
+        ix.log_skip = args.verbose;
         index_paths(&mut ix, &args.paths, &args, &allowed_extensions)?;
     } else {
         if args.verbose { println!("Updating index at: {}", index_file); }
@@ -219,6 +234,7 @@ fn main() -> anyhow::Result<()> {
         
         let mut ix = IndexWriter::create(&temp_new)?;
         ix.verbose = args.verbose;
+        ix.log_skip = args.verbose;
         index_paths(&mut ix, &args.paths, &args, &allowed_extensions)?;
         
         // Merge

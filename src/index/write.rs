@@ -8,7 +8,7 @@ use crate::sparse_set::Set as SparseSet;
 
 const NAME_GROUP_SIZE: usize = 16;
 const MAX_FILE_LEN: u64 = 1 << 30;
-const MAX_LINE_LEN: usize = 2000;
+const MAX_LINE_LEN: usize = 1 << 26; // 64MB - supports large minified JSON and other single-line files
 const MAX_TEXT_TRIGRAMS: usize = 20000;
 const INVALID_TRIGRAM: u32 = (1 << 24) - 1;
 const POST_BLOCK_SIZE: usize = 256;
@@ -339,6 +339,10 @@ impl<'a> PathWriter<'a> {
              let ps = p.s.as_bytes();
              while pre < ls.len() && pre < ps.len() && ls[pre] == ps[pre] {
                  pre += 1;
+             }
+             // Ensure pre is at a UTF-8 character boundary
+             while pre > 0 && !p.s.is_char_boundary(pre) {
+                 pre -= 1;
              }
         }
         
