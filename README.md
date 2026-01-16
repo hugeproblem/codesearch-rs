@@ -26,12 +26,15 @@ cindex [OPTIONS] <PATHS>...
 - `--reset`: Overwrite existing index (instead of merging)
 - `-a, --all-files`: Index all file types (disable extension filtering)
 - `-e, --extensions <EXTENSIONS>`: Additional file extensions to index (comma-separated)
+- `--checkpoint-interval <N>`: Save checkpoint every N files [default: 10000]
+- `--resume`: Resume from checkpoint if available
 - `-h, --help`: Print help
 - `-V, --version`: Print version
 
 **Notes:**
 - If an existing index file is invalid or corrupted, it will be automatically overwritten
 - Without `--reset`, new paths are merged with the existing index
+- Checkpoints allow resuming interrupted indexing operations
 
 **Examples:**
 ```bash
@@ -55,6 +58,12 @@ cindex --index /path/to/custom.index .
 
 # Force overwrite existing index
 cindex --reset .
+
+# Index with checkpoints (save every 50 files)
+cindex --checkpoint-interval 50 /large/codebase
+
+# Resume interrupted indexing
+cindex --resume /large/codebase
 ```
 
 ### Code Search (`csearch`)
