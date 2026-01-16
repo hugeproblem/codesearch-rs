@@ -23,10 +23,15 @@ cindex [OPTIONS] <PATHS>...
 - `-i, --index <INDEX>`: Specify index file path (optional)
 - `-v, --verbose`: Enable verbose output
 - `-n, --no-ignore`: Do not respect .gitignore files
+- `--reset`: Overwrite existing index (instead of merging)
 - `-a, --all-files`: Index all file types (disable extension filtering)
 - `-e, --extensions <EXTENSIONS>`: Additional file extensions to index (comma-separated)
 - `-h, --help`: Print help
 - `-V, --version`: Print version
+
+**Notes:**
+- If an existing index file is invalid or corrupted, it will be automatically overwritten
+- Without `--reset`, new paths are merged with the existing index
 
 **Examples:**
 ```bash
@@ -47,6 +52,9 @@ cindex -e "log,config,ini" .
 
 # Create index at specific location
 cindex --index /path/to/custom.index .
+
+# Force overwrite existing index
+cindex --reset .
 ```
 
 ### Code Search (`csearch`)
@@ -66,8 +74,21 @@ csearch [OPTIONS] <PATTERN>
 - `-f, --file-type <FILE_TYPE>`: Filter by file type (e.g. "rust", "cpp", "go")
 - `--list-file-types`: List supported file types
 - `--pwd`: Filter results to current working directory only
+- `-p, --path-format <FORMAT>`: Path display format (`relative`, `full`, `unc`) [default: `relative`]
+- `-c, --color <MODE>`: Color output mode (`auto`, `always`, `never`) [default: `auto`]
 - `-h, --help`: Print help
 - `-V, --version`: Print version
+
+**Path Format Options:**
+- `relative`: Display paths relative to current directory (default)
+- `full`: Display full absolute paths
+- `unc`: Display UNC paths (Windows extended path format with `\\?\` prefix)
+
+**Color Output:**
+When color is enabled (terminal detected or `--color always`):
+- **Filenames**: Magenta/bold
+- **Line numbers**: Green
+- **Matching text**: Red/bold
 
 **Examples:**
 ```bash
@@ -88,6 +109,15 @@ csearch -f rust "struct"
 
 # Search only in current directory
 csearch --pwd "pattern"
+
+# Display full paths
+csearch -p full "pattern"
+
+# Force color output (e.g., when piping to less -R)
+csearch -c always "pattern"
+
+# Disable color output
+csearch -c never "pattern"
 
 # List supported file types
 csearch --list-file-types
