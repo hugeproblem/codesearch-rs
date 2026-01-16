@@ -21,7 +21,7 @@ const NAME_GROUP_SIZE: usize = 16;
 const DELTA_ZERO_ENC: u32 = 16;
 
 pub struct Index {
-    mmap: Mmap,
+    pub mmap: Mmap,
     
     // Offsets/Counts
     pub path_data: usize,
@@ -125,7 +125,6 @@ impl Index {
         }
         let mut limit = max - min;
         let off_idx = self.name_index + (min / NAME_GROUP_SIZE) * 8;
-        
         // Check bounds for name_index access
         if off_idx + 8 > self.mmap.len() {
             return PathReader::new(&[], 0);
@@ -153,6 +152,39 @@ impl Index {
             }
         }
         r
+    }
+    
+    pub fn roots(&self) -> PathReader<'_> {
+        self.roots_at(0, self.num_path)
+    }
+
+    pub fn roots_at(&self, min: usize, max: usize) -> PathReader<'_> {
+        if min >= self.num_path || max <= min {
+            return PathReader::new(&[], 0);
+        }
+        let limit = max - min;
+        // Roots are stored starting at path_data.
+        
+        let data_start = self.path_data;
+        let end = self.name_data;
+        
+        if data_start >= end || data_start >= self.mmap.len() || end > self.mmap.len() {
+             return PathReader::new(&[], 0);
+        }
+        
+        let data = &self.mmap[data_start .. end];
+        
+        let mut r = PathReader::new(data, limit);
+        for _ in 0..min {
+            if r.next().is_none() {
+                break;
+            }
+        }
+        r
+    }
+
+    pub fn post_map_iter(&self) -> PostMapIter<'_> {
+        PostMapIter::new(self)
     }
     
     pub fn posting_query(&self, q: &Query) -> Vec<u32> {
@@ -395,9 +427,7 @@ impl<'a> PathReader<'a> {
     }
     
     pub fn next(&mut self) -> Option<String> {
-        if self.limit == 0 {
-            return None;
-        }
+        if self.limit == 0 { return None; }
         self.limit -= 1;
         
         let (pre, w1) = read_uvarint(self.data);
@@ -411,35 +441,89 @@ impl<'a> PathReader<'a> {
         let pre = pre as usize;
         let n = n as usize;
         
-        if pre > self.path.len() || n > self.data.len() {
-            return None; 
-        }
-        
-        self.path.truncate(pre);
-        if let Ok(s) = str::from_utf8(&self.data[..n]) {
-            self.path.push_str(s);
-        } else {
-            // handle invalid utf8 gracefully?
+        if pre > self.path.len() {
              return None;
         }
-        self.data = &self.data[n..];
-        
-        Some(self.path.clone())
+        self.path.truncate(pre);
+        if n > self.data.len() {
+            return None;
+        }
+        match str::from_utf8(&self.data[..n]) {
+            Ok(s) => {
+                self.path.push_str(s);
+                self.data = &self.data[n..];
+                Some(self.path.clone())
+            }
+            Err(_) => None,
+        }
     }
 }
 
+pub struct PostMapIter<'a> {
+    ix: &'a Index,
+    block: &'a [u8],
+    next_block: usize,
+    tri_num: usize,
+    file_offset: usize,
+}
+
+impl<'a> PostMapIter<'a> {
+    fn new(ix: &'a Index) -> Self {
+        PostMapIter {
+            ix,
+            block: &[],
+            next_block: 0,
+            tri_num: 0,
+            file_offset: 0,
+        }
+    }
+    
+    // Returns (trigram, count, offset)
+    pub fn next(&mut self) -> Option<(u32, usize, usize)> {
+        if self.tri_num >= self.ix.num_post {
+            return None;
+        }
+        
+        self.tri_num += 1;
+        
+        if self.block.len() < 3 || (self.block[0] == 0 && self.block[1] == 0 && self.block[2] == 0) {
+             if self.ix.post_index + self.next_block + POST_BLOCK_SIZE > self.ix.mmap.len() {
+                 return None;
+             }
+             let start = self.ix.post_index + self.next_block;
+             self.block = &self.ix.mmap[start .. start + POST_BLOCK_SIZE];
+             self.next_block += POST_BLOCK_SIZE;
+             self.file_offset = 0;
+        }
+        
+        let trigram = read_u24_be(&self.block[0..3]);
+        self.block = &self.block[3..];
+        
+        let (count, n1) = read_uvarint(self.block);
+        self.block = &self.block[n1..];
+        
+        let (off, n2) = read_uvarint(self.block);
+        self.block = &self.block[n2..];
+        
+        self.file_offset += off as usize;
+        
+        Some((trigram, count as usize, self.file_offset))
+    }
+}
+
+
 // PostReader
 
-struct PostReader<'a> {
+pub struct PostReader<'a> {
     count: usize,
     // offset: usize, // not strictly needed if we just hold the slice
-    fileid: i32,
+    pub fileid: i32,
     restrict: Option<Vec<u32>>,
     delta: DeltaReader<'a>,
 }
 
 impl<'a> PostReader<'a> {
-    fn new(ix: &'a Index, trigram: u32, restrict: Option<Vec<u32>>) -> Self {
+    pub fn new(ix: &'a Index, trigram: u32, restrict: Option<Vec<u32>>) -> Self {
         let (count, offset) = ix.find_list_v2(trigram);
         if count == 0 {
              return PostReader {
@@ -470,11 +554,11 @@ impl<'a> PostReader<'a> {
         }
     }
     
-    fn max(&self) -> usize {
+    pub fn max(&self) -> usize {
         self.count
     }
     
-    fn next(&mut self) -> bool {
+    pub fn next(&mut self) -> bool {
         if self.count == 0 {
             return false;
         }
@@ -516,7 +600,7 @@ impl<'a> DeltaReader<'a> {
         DeltaReader { d: data, b: 0, nb: 0 }
     }
     
-    fn next(&mut self) -> Option<u32> {
+    pub fn next(&mut self) -> Option<u32> {
         let i = self.next64()?;
         if i == DELTA_ZERO_ENC as u64 {
             Some(0)

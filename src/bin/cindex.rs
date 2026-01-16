@@ -1,9 +1,11 @@
 use clap::Parser;
 use rust_codesearch::index::IndexWriter;
+use rust_codesearch::index::merge::merge;
 use rust_codesearch::find_index_file;
 use ignore::WalkBuilder;
 use std::collections::HashSet;
 use std::path::Path;
+use std::fs;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -16,6 +18,9 @@ struct Args {
 
     #[arg(short = 'n', long, help = "Do not respect .gitignore files")]
     no_ignore: bool,
+    
+    #[arg(long, help = "Overwrite existing index")]
+    reset: bool,
 
     #[arg(short = 'a', long, help = "Index all file types (disable extension filtering)")]
     all_files: bool,
@@ -120,14 +125,63 @@ fn should_index_file(path: &Path, allowed_extensions: &HashSet<String>, index_al
     false
 }
 
+fn index_paths(ix: &mut IndexWriter, paths: &[String], args: &Args, allowed_extensions: &HashSet<String>) -> anyhow::Result<()> {
+    for path in paths {
+        let abs_path = if let Ok(p) = fs::canonicalize(path) {
+             p.to_string_lossy().to_string()
+        } else {
+             path.clone()
+        };
+        
+        ix.add_root(&abs_path);
+
+        let mut builder = WalkBuilder::new(path);
+        
+        if args.no_ignore {
+            builder.ignore(false);
+            builder.git_ignore(false);
+            builder.git_global(false);
+            builder.git_exclude(false);
+        }
+        
+        let mut files = Vec::new();
+        
+        for entry in builder.build() {
+            let entry = entry?;
+            if entry.file_type().map_or(false, |ft| ft.is_file()) {
+                let path = entry.path();
+                
+                if should_index_file(path, allowed_extensions, args.all_files) {
+                     let path_str = if let Ok(p) = fs::canonicalize(path) {
+                         p.to_string_lossy().to_string()
+                     } else {
+                         path.to_string_lossy().to_string()
+                     };
+                     files.push(path_str);
+                } else if args.verbose {
+                    println!("Skipping: {}", path.to_string_lossy());
+                }
+            }
+        }
+        
+        files.sort();
+        
+        for path_str in files {
+            if args.verbose {
+                println!("{}", path_str);
+            }
+            ix.add_file(&path_str)?;
+        }
+    }
+    ix.flush()?;
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     env_logger::init();
     let args = Args::parse();
 
-    // Build allowed extensions set
     let mut allowed_extensions = get_default_extensions();
-    
-    // Add user-specified extensions
     if let Some(ref ext_list) = args.extensions {
         for ext in ext_list.split(',') {
             let ext = ext.trim().to_lowercase();
@@ -145,43 +199,41 @@ fn main() -> anyhow::Result<()> {
     let index_file = if args.index.is_empty() {
         find_index_file(true)?
     } else {
-        args.index
+        args.index.clone()
     };
-
-    let mut ix = IndexWriter::create(&index_file)?;
-    println!("Creating index at: {}", index_file);
-    ix.verbose = args.verbose;
-
-    for path in args.paths {
-        let mut builder = WalkBuilder::new(&path);
+    
+    let path_exists = Path::new(&index_file).exists();
+    
+    if args.reset || !path_exists {
+        let mut ix = IndexWriter::create(&index_file)?;
+        if args.verbose { println!("Creating index at: {}", index_file); }
+        ix.verbose = args.verbose;
+        index_paths(&mut ix, &args.paths, &args, &allowed_extensions)?;
+    } else {
+        if args.verbose { println!("Updating index at: {}", index_file); }
         
-        // Configure gitignore handling
-        if args.no_ignore {
-            builder.ignore(false);
-            builder.git_ignore(false);
-            builder.git_global(false);
-            builder.git_exclude(false);
-        }
+        let temp_new = format!("{}.tmp_new", index_file);
+        let temp_merged = format!("{}.tmp_merged", index_file);
         
-        for entry in builder.build() {
-            let entry = entry?;
-            if entry.file_type().map_or(false, |ft| ft.is_file()) {
-                let path = entry.path();
-                
-                // Check if file should be indexed based on extension
-                if should_index_file(path, &allowed_extensions, args.all_files) {
-                    let path_str = path.to_string_lossy();
-                    if args.verbose {
-                        println!("{}", path_str);
-                    }
-                    ix.add_file(&path_str)?;
-                } else if args.verbose {
-                    println!("Skipping: {}", path.to_string_lossy());
-                }
+        // Ensure cleanup in case of failure? (Using simple logic for now)
+        
+        let mut ix = IndexWriter::create(&temp_new)?;
+        ix.verbose = args.verbose;
+        index_paths(&mut ix, &args.paths, &args, &allowed_extensions)?;
+        
+        // Merge
+        match merge(&temp_merged, &index_file, &temp_new) {
+            Ok(_) => {
+                fs::rename(&temp_merged, &index_file)?;
+                let _ = fs::remove_file(&temp_new);
+            }
+            Err(e) => {
+                let _ = fs::remove_file(&temp_new);
+                let _ = fs::remove_file(&temp_merged); // might not exist
+                return Err(e.into());
             }
         }
     }
 
-    ix.flush()?;
     Ok(())
 }

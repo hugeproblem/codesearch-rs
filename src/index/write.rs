@@ -19,8 +19,8 @@ const WRITE_VERSION: i32 = 2;
 
 pub struct IndexBuffer {
     file: File,
-    writer: BufWriter<File>,
-    offset: u64,
+    pub writer: BufWriter<File>,
+    pub offset: u64,
 }
 
 impl IndexBuffer {
@@ -581,6 +581,8 @@ pub struct IndexWriter {
     
     pub verbose: bool,
     pub log_skip: bool,
+
+    roots: Vec<String>,
     
     // State
     name_writer_state: PathWriterState,
@@ -606,12 +608,17 @@ impl IndexWriter {
             num_trigram: 0,
             total_bytes: 0,
             post_ends: Vec::new(),
+            roots: Vec::new(),
             verbose: false,
             log_skip: false,
             name_writer_state: PathWriterState::new(NAME_GROUP_SIZE),
         })
     }
     
+    pub fn add_root(&mut self, root: &str) {
+        self.roots.push(root.to_string());
+    }
+
     pub fn add_file(&mut self, name: &str) -> io::Result<()> {
         let f = File::open(name);
         if f.is_err() {
@@ -726,7 +733,22 @@ impl IndexWriter {
         self.main_buf.write_string("csearch index 2\n")?;
         
         let roots_off = self.main_buf.offset();
-        let roots_count = 0; 
+        
+        // Write roots
+        let mut root_state = PathWriterState::new(NAME_GROUP_SIZE);
+        
+        // Since we can't easily sort self.roots inside the borrow of main_buf (which is in self),
+        // we should sort before creating PathWriter.
+        self.roots.sort();
+        
+        {
+            let mut pw = PathWriter::new(&mut self.main_buf, None, &mut root_state);
+             for r in &self.roots {
+                pw.write(&IndexPath::new(r.clone()))?;
+            }
+        }
+        
+        let roots_count = self.roots.len(); 
         self.main_buf.align(16)?;
         
         let name_off = self.main_buf.offset();
