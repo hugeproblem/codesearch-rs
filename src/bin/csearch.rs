@@ -3,11 +3,12 @@ use clap::{Parser, ValueEnum};
 use rust_codesearch::index::{Index, regexp};
 use rust_codesearch::find_index_file;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use regex::bytes::RegexBuilder;
 use std::path::Path;
 use ignore::types::TypesBuilder;
 use ignore::Match;
+use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug, ValueEnum)]
 enum PathFormat {
@@ -17,6 +18,16 @@ enum PathFormat {
     Full,
     /// UNC path (Windows extended path format)
     Unc,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug, ValueEnum)]
+enum ColorMode {
+    /// Auto-detect terminal support
+    Auto,
+    /// Always use colors
+    Always,
+    /// Never use colors
+    Never,
 }
 
 #[derive(Parser, Debug)]
@@ -56,6 +67,10 @@ struct Args {
     /// Path display format (relative, full, unc)
     #[arg(short = 'p', long, value_enum, default_value = "relative")]
     path_format: PathFormat,
+
+    /// Color output mode (auto, always, never)
+    #[arg(short = 'c', long, value_enum, default_value = "auto")]
+    color: ColorMode,
 }
 
 /// Format path according to the specified format
@@ -103,6 +118,64 @@ fn strip_unc_prefix(path: &str) -> String {
     } else {
         path.to_string()
     }
+}
+
+/// Print a line with highlighted matches
+fn print_highlighted_line(
+    stdout: &mut StandardStream,
+    path: &str,
+    line_num: Option<u64>,
+    line: &str,
+    re: &regex::bytes::Regex,
+    use_color: bool,
+) -> std::io::Result<()> {
+    if use_color {
+        // Print filename in magenta/bold
+        stdout.set_color(ColorSpec::new().set_fg(Some(Color::Magenta)).set_bold(true))?;
+        write!(stdout, "{}", path)?;
+        stdout.reset()?;
+        
+        write!(stdout, ":")?;
+        
+        // Print line number in green if present
+        if let Some(num) = line_num {
+            stdout.set_color(ColorSpec::new().set_fg(Some(Color::Green)))?;
+            write!(stdout, "{}", num)?;
+            stdout.reset()?;
+            write!(stdout, ":")?;
+        }
+        
+        // Highlight matching parts in line
+        let line_bytes = line.as_bytes();
+        let mut last_end = 0;
+        
+        for mat in re.find_iter(line_bytes) {
+            // Print non-matching part
+            let before = String::from_utf8_lossy(&line_bytes[last_end..mat.start()]);
+            write!(stdout, "{}", before)?;
+            
+            // Print matching part in red/bold
+            stdout.set_color(ColorSpec::new().set_fg(Some(Color::Red)).set_bold(true))?;
+            let matched = String::from_utf8_lossy(&line_bytes[mat.start()..mat.end()]);
+            write!(stdout, "{}", matched)?;
+            stdout.reset()?;
+            
+            last_end = mat.end();
+        }
+        
+        // Print remaining part
+        let after = String::from_utf8_lossy(&line_bytes[last_end..]);
+        writeln!(stdout, "{}", after)?;
+    } else {
+        // No color - simple output
+        if let Some(num) = line_num {
+            writeln!(stdout, "{}:{}:{}", path, num, line)?;
+        } else {
+            writeln!(stdout, "{}:{}", path, line)?;
+        }
+    }
+    
+    Ok(())
 }
 
 fn main() -> Result<()> {
@@ -190,6 +263,19 @@ fn main() -> Result<()> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let cwd_for_format = cwd.canonicalize().unwrap_or(cwd);
     
+    // Setup color output
+    let color_choice = match args.color {
+        ColorMode::Auto => ColorChoice::Auto,
+        ColorMode::Always => ColorChoice::Always,
+        ColorMode::Never => ColorChoice::Never,
+    };
+    let mut stdout = StandardStream::stdout(color_choice);
+    let use_color = match args.color {
+        ColorMode::Always => true,
+        ColorMode::Never => false,
+        ColorMode::Auto => atty::is(atty::Stream::Stdout),
+    };
+    
     let re = RegexBuilder::new(&pattern)
         .case_insensitive(args.ignore_case)
         .build()
@@ -257,10 +343,11 @@ fn main() -> Result<()> {
                         let line = String::from_utf8_lossy(&line_bytes);
                         // Remove trailing \r if present
                         let line = line.trim_end_matches('\r');
-                        if args.line_number {
-                            println!("{}:{}:{}", display_path, line_num, line);
-                        } else {
-                            println!("{}:{}", display_path, line);
+                        let line_num_opt = if args.line_number { Some(line_num) } else { None };
+                        if let Err(e) = print_highlighted_line(&mut stdout, &display_path, line_num_opt, line, &re, use_color) {
+                            if args.verbose {
+                                eprintln!("Warning: failed to write output: {}", e);
+                            }
                         }
                     }
                 }
